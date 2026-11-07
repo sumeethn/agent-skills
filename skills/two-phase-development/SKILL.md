@@ -89,6 +89,8 @@ Merge only if all hold at the moment of merging, re-checked from live state:
   tests, CI and review on the new head. Do not merge stale evidence.
 - The host reports the MR mergeable under repository policy. Merge with a SHA-conditional merge
   (check the host CLI's help for the flag; do not guess) and **without** the delete-branch option.
+  If the CLI defaults to auto-merge or merge-when-pipeline-succeeds, disable it so the merge is
+  immediate and verifiable.
 - Do not ask for separate human merge approval and never call an approval API or bypass
   protection. If policy requires approvals or blocks the merge, stop, report the exact policy
   message, and mark the run blocked.
@@ -97,6 +99,31 @@ After any merge call, fetch the MR and verify state is merged and the merge matc
 SHA, retrying only after a fresh GET. Then delete the source branch only if the merge is verified
 and the branch head still equals the expected SHA; confirm it is gone. Report done only when merge
 and deletion are both verified.
+
+## Cleanup after completion
+
+Run only after merge and branch deletion are both verified; never after a blocked or escalated run.
+
+1. **Reconcile messages**: `orchestration inbox --terminal run:<run_id>`; every `worker_done`,
+   question and escalation must already be handled. `gate-list` must be empty.
+2. **Close out tasks and run**: `task-list` shows every task `completed`; fix any that are not with
+   `task-update --status completed` only if its outcome truly succeeded. Orca has no run-complete
+   command: the run is complete when all tasks are completed, no gates are pending and no worker is
+   live. Set `phase` to `complete` in `state.json`.
+3. **Close workers**: `worker-stop` on an already-settled dispatch is a no-op (`alreadySettled`)
+   and leaves a kept-open agent running. Close a settled worker with `worker-release`
+   (archives its transcript). Use `worker-stop` only for an unsettled worker. Confirm with
+   `worker-list` that every worker is `exited` and `released`.
+4. **Remove the implementer worktree only after proving it is disposable**, in its own checkout:
+   fetch the target branch, then require all of: empty `git status --porcelain --ignored`, no
+   stash, `HEAD` is an ancestor of the freshly fetched target branch, and zero commits outside it.
+   Then `orca worktree rm --worktree path:<path>` **without** `--force`. Any failed check means keep
+   it and report. Do not delete the local branch unless the user asked (`--delete-branch`).
+5. **Preserve**: the run record and `evidence/` (under `.git`), remote environments, caches and
+   downloaded model weights. Report what was kept and what was removed.
+
+If a token-saving hook rewrites or compresses command output, re-run decisive checks (git status,
+merge help) with the full binary path before acting on them.
 
 ## Hard rules
 
