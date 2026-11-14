@@ -48,8 +48,11 @@ Every design defines one, and `phased-implementation` enforces it unchanged:
   permitted environment.
 - **Measurement protocol**: benchmark and evaluation commands; cold-start or steady-state scope;
   identical preparation of both builds (compilation and autotuning caches, model loading, prefix
-  or KV caches); paired runs in alternating or randomized order on the same host set with no other
-  load; timing that ends at device completion; sample count; and the pass rule per metric: the
+  or KV caches); for steady-state runs, warmup until the metrics stabilize with warmup samples
+  excluded, and for cold-start runs, the declared initial state; paired runs in alternating or
+  randomized order on the same host set with no other load; a timing boundary that fits each
+  metric (client-visible response completion for serving latency, device synchronization for
+  device-level timing); sample count; and the pass rule per metric: the
   paired difference, signed so that positive is better, must clear the guardrail margin or minimum
   gain at a stated confidence. Clocks, temperatures and other load are recorded; a run under
   unstable conditions is discarded and repeated, and a result that stays inconclusive blocks.
