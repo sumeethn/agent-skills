@@ -30,18 +30,30 @@ belong to `phased-implementation`.
 Every design defines one, and `phased-implementation` enforces it unchanged:
 
 - **Workload**: model and checkpoint, precision, input and output length distribution, batch size or
-  concurrency, and request pattern (offline batch, or online at a stated arrival rate).
-- **Metrics**: only those that matter here, each with direction and target, for example time to
-  first token, inter-token latency, end-to-end latency percentiles, throughput at a latency
-  objective, and peak memory.
-- **Quality gate**: how outputs are proven unchanged or acceptable. Exact token match under greedy
-  decoding for numerically equivalent changes; a named evaluation and tolerance for lossy ones
-  (quantization, speculative or approximate methods).
+  concurrency, and request pattern. For online serving, also the load generator: open or closed
+  loop, arrival process and rate, timeouts, and how errors, drops and offered versus achieved
+  throughput are counted.
+- **Metrics**: only those that matter here, for example time to first token, inter-token latency,
+  end-to-end latency percentiles, throughput at a latency objective, and peak memory. Each has a
+  direction, a statistic (median, p99, ...) and a role: a **guardrail** must not regress beyond its
+  stated margin at any merge; a **goal** is a target the final result must reach. Distributed work
+  is measured end to end across the whole host set, with memory per device.
+- **Quality gate**, chosen by numerical risk against a named reference on representative inputs,
+  shapes and batch sizes: tensor or logit tolerances for changes meant to be numerically
+  equivalent, and a named evaluation with a bound for lossy ones (quantization, approximate
+  methods). Exact token match only when exact output compatibility is itself required, with
+  deterministic settings fixed.
 - **Environment manifest**: hardware model, count and interconnect, driver, runtime and library
-  versions, container image digest, and clock or power settings when they matter.
-- **Measurement protocol**: benchmark and evaluation commands, warmup, repetitions, the statistic
-  reported (median with spread), and the noise threshold from repeated runs of the same build. A
-  change counts as a gain only when it exceeds that threshold, measured on the same host.
+  versions, container image digest, and clock or power settings when they matter. This is the
+  permitted environment.
+- **Measurement protocol**: benchmark and evaluation commands; cold-start or steady-state scope;
+  identical preparation of both builds (compilation and autotuning caches, model loading, prefix
+  or KV caches); paired runs in alternating or randomized order on the same host set with no other
+  load; timing that ends at device completion; sample count; and the pass rule per metric: the
+  paired difference, signed so that positive is better, must clear the guardrail margin or minimum
+  gain at a stated confidence. Clocks, temperatures and other load are recorded; a run under
+  unstable conditions is discarded and repeated, and a result that stays inconclusive blocks.
+  Repeated runs of one build (A/A) calibrate variability and the sample count.
 
 ## 0. Intake (at invocation)
 
@@ -79,8 +91,9 @@ Optimize from evidence, not intuition. If a benchmark harness and the target har
 available, run the protocol on the current target branch: record the environment manifest, the
 baseline numbers with their spread, and a profile showing where time and memory go (kernels,
 memory bandwidth, communication, host overhead, scheduling or batching, data movement). Estimate
-the headroom with roofline-style reasoning: what the hardware could do for this workload versus
-what it does now. Save everything under `baseline/`. These are measurements, not code changes;
+the headroom with whatever analysis fits the bottleneck: roofline-style for compute- or
+bandwidth-bound work, queueing and scheduling analysis for serving, communication analysis for
+distributed work. Save everything under `baseline/`. These are measurements, not code changes;
 commit nothing.
 
 If no harness exists or the hardware is unavailable, say so, mark the baseline and bottleneck

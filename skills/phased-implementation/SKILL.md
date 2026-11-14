@@ -4,11 +4,11 @@ description: >-
   Build an approved model inference or inference performance design in phases
   using Orca workers: Claude writes the software structure and a phase plan, a
   read-only Codex critic checks it, the user approves it, then for each phase
-  Codex implements, runs the tests, the quality gate and an A/B benchmark against
-  the base on the target hardware, pushes a branch and opens an MR while Claude
-  reviews the code and the measurements (max 5 rounds); the MR merges
-  automatically only if quality holds, no contracted metric regresses and the
-  phase's measured gain is met. Use when the user asks for phased implementation
+  Codex implements, runs the tests, the quality gate and a paired benchmark
+  against the base and the baseline on the target hardware, pushes a branch and
+  opens an MR while Claude reviews the code and the measurements (max 5 rounds);
+  the MR merges automatically only if quality holds, no guardrail metric
+  regresses and the phase's minimum gain passes. Use when the user asks for phased implementation
   of an approved inference design, Codex implementation with Claude review, or an
   MR-per-phase optimization workflow with automatic fail-closed merge. Needs an
   approved design document with a performance contract (for example from
@@ -58,8 +58,10 @@ repair a design here. From here on every reader, Claude and workers alike, uses 
 **New run**: create the run record and set `implementation.frozen` once: target remote, design
 path and hash, the target SHA from the gate, test commands, benchmark and quality-gate commands,
 the environment manifest, and required CI jobs. **Resume**: never overwrite `frozen` at intake.
-First compare it with what intake found: a different design hash is a design change, and different
-commands, environment manifest, required CI jobs or target remote are a plan change. Replace
+First compare it with what intake found: a different design hash, or commands or an environment
+that no longer implement the design's performance contract, is a design change; an operational
+substitution that preserves the contract (for example a renamed script, or another host matching
+the manifest), different required CI jobs or a different target remote is a plan change. Replace
 `frozen` (and the run-record `design.md`) only when that design or plan change has been
 re-approved.
 
@@ -75,8 +77,8 @@ environment manifest, CI links).
 `state.json` has `"schema": 1`, `task_id`, `target_branch`, and an `implementation` object that
 this skill owns: `phase` (`intake`, `plan`, `build`, `complete` or `blocked`), `frozen`
 (`remote`, `design_path`, `design_hash`, `target_sha`, `test_commands`, `benchmark_commands`,
-`quality_commands`, `environment`, `required_ci_jobs`), `baseline` (`sha`, `noise_threshold`,
-`results` path), `plan_round`, `plan_hash`, `approved_plan_hash`, `current`, `blocked_reason`, and
+`quality_commands`, `environment`, `required_ci_jobs`), `baseline` (`sha`, `variability`,
+`sample_count`, `results` path), `plan_round`, `plan_hash`, `approved_plan_hash`, `current`, `blocked_reason`, and
 `phases`, a list with one entry per phase: `id`, `status` (`pending`, `active`, `merged` or
 `blocked`), `branch`, `target_sha`, `head_sha`, `tested_sha`, `measured_sha`, `reviewed_sha`,
 `signed_off_sha`, `mr`, `review_round`, `open_findings`. Leave every other key untouched. Update after every step. On
@@ -113,8 +115,8 @@ steps. Evidence is tied to a SHA and is void when the head SHA changes.
 ## 2. Baseline
 
 Before the first optimization phase, establish the baseline on the frozen environment at the
-current target SHA: run the benchmark protocol repeatedly on the same build to measure the noise
-threshold, then record the baseline results and the quality-gate reference outputs. Reuse the
+current target SHA: run the protocol's A/A runs on that build to calibrate variability and the
+sample count, then record the baseline results and the quality-gate reference outputs. Reuse the
 design's `baseline/` only if its environment manifest and SHA still match. If the harness is
 built by an earlier phase, measure the baseline right after that phase merges. Record
 `implementation.baseline`.
@@ -130,10 +132,11 @@ Run one phase at a time. Start a phase only when every phase it depends on is `m
    `design.md` and its hash, this phase's section of the plan, the plan's structure, build/test
    commands and environment, allowed files, the target branch and `target_sha`, branch name, and
    what to report. It must: create its branch from `target_sha`, implement only this phase, run the
-   tests and the quality gate, and for an optimization phase run an **A/B benchmark** with the
-   frozen protocol: base (`target_sha`) and head built the same way and measured on the same host
-   in the same session, interleaved, with the environment manifest captured, plus a profile that
-   shows the mechanism behind any change. Then push the branch and open the MR **into the target
+   tests and the quality gate, and for an optimization phase run a **paired benchmark** with the
+   frozen protocol: head against base (`target_sha`) and, when the base is not the baseline, also
+   against the baseline SHA, all prepared identically and measured in the same session on the same
+   host set, with the environment manifest captured; plus a profile when the mechanism is
+   uncertain or the results contradict the hypothesis. Then push the branch and open the MR **into the target
    branch** with the **actual** commands, raw numbers, spread and manifest. It must never claim a
    test or measurement that did not run, must not tune the benchmark or workload to the change, and
    must report an environment blocker rather than guess around it.
@@ -143,17 +146,18 @@ Run one phase at a time. Start a phase only when every phase it depends on is `m
 3. Review as Claude, against the exact head SHA, for correctness against the design, this phase's
    acceptance criteria and the plan's structure, and for tests, safety and simplicity. Check the
    measurements: the manifest matches `frozen.environment`, the protocol was followed, the quality
-   gate passed, every contracted metric either improved beyond the noise threshold or stayed within
-   it, the gain meets the phase minimum, and the profile explains it. Record findings with stable
+   gate passed, every guardrail passes its pass rule against both the base and the baseline, the
+   phase's minimum gain passes, and a required profile explains it. Record findings with stable
    IDs (`<phase-id>-<n>`) in `findings.md`. Blocking findings become MR discussions when the host
    supports it.
 4. Send blocking findings to the implementer with `send`. It fixes, reruns affected tests, the
-   quality gate and the A/B benchmark, pushes, and reports the new SHA and results. Review that
+   quality gate and the paired benchmark, pushes, and reports the new SHA and results. Review that
    SHA. A prior finding counts as resolved only when you explicitly dispose of it.
 5. **A hypothesis that does not hold is not a review finding to code around.** If the phase is
-   correct and within the quality gate but its measured gain is below the minimum, or the profile
-   shows a different bottleneck, stop the phase and bring the user the numbers: it is a plan
-   change, or a design change if the bottleneck analysis was wrong.
+   correct and within the quality gate but its gain does not pass its minimum, the result stays
+   inconclusive, or the evidence contradicts the hypothesis's mechanism, stop the phase and bring
+   the user the numbers: it is a plan change, or a design change if the bottleneck analysis was
+   wrong. A bottleneck that moves elsewhere after a passing gain is expected, not a failure.
 6. After 5 unsuccessful rounds, stop and escalate to the user with the open findings.
 7. **Sign-off.** When you have no open blocking finding on a head SHA, ask the implementer to
    confirm for that exact SHA: it is its final push, nothing is unpushed, and it knows of no
@@ -164,14 +168,16 @@ Run one phase at a time. Start a phase only when every phase it depends on is `m
 
 ## Changes
 
-- **Design change** (scope, an interface, the data model, agreed behaviour, the performance
-  contract, or a disproven bottleneck analysis): stop the implementer,
+- **Design change** (scope, an interface, the data model, agreed behaviour, any part of the
+  performance contract including commands or environments that no longer implement it, or a
+  disproven bottleneck analysis): stop the implementer,
   set `phase` to `blocked` with the reason, and tell the user exactly what in the design must
   change. The design is revised and re-approved outside this skill (`design-convergence`). Resume
   only through the design gate with the new hash, then re-plan the unmerged phases.
-- **Plan change** (phase boundaries, order, acceptance criteria or minimum gains, structure, frozen
-  commands, or the environment manifest): revise the plan for the unmerged phases, run one critic
-  round, and get user approval again. A new environment also needs a new baseline. Merged phases
+- **Plan change** (phase boundaries, order, acceptance criteria or minimum gains, structure, or an
+  operational substitution of commands or hosts that preserves the contract): revise the plan for
+  the unmerged phases, run one critic round, and get user approval again. A different host needs a
+  new baseline. Merged phases
   stay as they are.
 - Anything else is ordinary review within the phase.
 
@@ -183,11 +189,12 @@ Merge only if all hold at the moment of merging, re-checked from live state:
 - Required tests and the quality gate passed on that SHA; CI succeeded for that SHA with every
   required job passing (a pipeline merely existing is not success; missing, pending, failed,
   skipped or stale is not).
-- For an optimization phase, the A/B benchmark ran on that SHA (`measured_sha`) against its base on
-  the frozen environment: no contracted metric regressed beyond the noise threshold, and the gain
-  meets the phase minimum.
+- For an optimization phase, the paired benchmark ran on that SHA (`measured_sha`) on the frozen
+  environment: every guardrail passes against both the base and the baseline (so small losses
+  cannot accumulate across phases), and the phase's minimum gain passes. On the last phase, every
+  goal is also met. An inconclusive result blocks.
 - Target branch freshly fetched: if it moved since testing/review, integrate it, then repeat
-  tests, the quality gate, the A/B benchmark against the new base, CI, review and sign-off on the
+  tests, the quality gate, the paired benchmark against the new base, CI, review and sign-off on the
   new head. Do not merge stale evidence.
 - The design file read from the freshly fetched `<remote>/<target>` commit still has
   `frozen.design_hash`. If not, treat it as a design change.
@@ -227,9 +234,9 @@ when merge and deletion are both verified, and tell the user in one line which p
    command: the run is complete when all tasks are completed, no gates are pending and no worker is
    live. Confirm with `worker-list` that every worker is `exited` and `released`. Set `phase` to
    `complete` in `state.json`.
-5. **Report the result against the contract**: run the frozen protocol once more on the final
-   target SHA against the baseline SHA, A/B on the same host, and report each contracted metric's
-   baseline, final value, spread and target, and whether the quality gate held.
+5. **Report the result against the contract**: from the last phase's measurements, report each
+   contracted metric's baseline, final value, spread, role and target, and whether the quality gate
+   held.
 6. **Preserve**: the run record, `baseline/` and `evidence/` (under `.git`), remote environments,
    caches and downloaded model weights. Report what was kept and what was removed.
 
@@ -243,8 +250,8 @@ merge help) with the full binary path before acting on them.
 - One phase, one branch, one MR. No phase starts before its dependencies are merged.
 - Report only what was actually run. Mocked results are labelled as mocked.
 - Every performance number names its SHA, environment manifest and protocol. Never compare numbers
-  from different hosts, environments or sessions, and never change the workload or benchmark to
-  make a phase pass.
+  from different host sets, environments or sessions, and never change the workload or benchmark
+  to make a phase pass.
 - No credentials, tokens, or project config in the skill, run record, MR text or worker specs.
 - No force-push, no hook skipping, no protection bypass, no unrelated branch changes.
 - Do not add features, abstractions, or flags beyond the approved design and plan.

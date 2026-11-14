@@ -13,9 +13,9 @@ without adding an orchestration framework of their own.
 The **performance contract** in the design fixes the workload, the metrics and their targets, the
 quality gate that proves outputs are unchanged or acceptable, the environment manifest and the
 measurement protocol. `phased-implementation` enforces it: a phase merges only if quality holds,
-no contracted metric regresses beyond measured noise, and the phase's expected gain is measured on
-the same host against its base. A gain that does not materialize stops the run for a decision
-rather than being coded around.
+no guardrail metric regresses against its base or the original baseline, the phase's minimum gain
+passes in a paired benchmark on the same hosts, and on the last phase every goal is met. A gain
+that does not materialize stops the run for a decision rather than being coded around.
 
 The handoff between them is the design document on the target branch, identified by its SHA-256.
 `phased-implementation` never edits the design; a needed design change stops it and goes back
