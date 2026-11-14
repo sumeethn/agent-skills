@@ -33,8 +33,12 @@ CI jobs. **Inspect first**: `AGENTS.md`, `CLAUDE.md`, `README`, `CONTRIBUTING`, 
 `Makefile`/package scripts, `git remote -v`, default branch. Ask the user only for what is still
 missing, in one batch. Do not assume any framework, hardware, path or dependency.
 
-**Design gate.** Fetch the target branch and resolve the fetched remote-tracking ref
-(`origin/<target>`, never the local branch) to a commit SHA. Read the design from that commit with
+**Target remote.** Identify the git remote whose URL is the MR's repository (often `origin`, but
+in a fork checkout usually `upstream`); confirm it matches the repository and host from intake. Every
+`<remote>` below is that remote; never assume `origin`.
+
+**Design gate.** Fetch the target branch from `<remote>` and resolve the fetched remote-tracking
+ref (`<remote>/<target>`, never the local branch) to a commit SHA. Read the design from that commit with
 `git show <sha>:<path>`; if that fails, the design is not on the target branch. Save those exact
 bytes as `design.md` in the run record and take their SHA-256. Proceed only if either the run
 record's `design.approved_hash` equals that hash, or the user confirms, when shown the path and
@@ -42,9 +46,12 @@ hash, that this is the approved design. Otherwise stop and say what is missing. 
 repair a design here. From here on every reader, Claude and workers alike, uses the run-record
 `design.md` and its hash, never a design file in a checkout.
 
-Create or extend the run record and record in `implementation.frozen`: design path and hash, the
-target SHA from the gate, test commands and required CI jobs. On resume, compare the project's
-current test commands and required CI jobs with `frozen`; any difference is a plan change.
+**New run**: create the run record and set `implementation.frozen` once: target remote, design
+path and hash, the target SHA from the gate, test commands and required CI jobs. **Resume**: never
+overwrite `frozen` at intake. First compare it with what intake found: a different design hash is a
+design change, and different test commands, required CI jobs or target remote are a plan change.
+Replace `frozen` (and the run-record `design.md`) only when that design or plan change has been
+re-approved.
 
 ## Run record
 
@@ -55,7 +62,8 @@ only; reuse the design's task ID when its run record exists. Files: `state.json`
 
 `state.json` has `"schema": 1`, `task_id`, `target_branch`, and an `implementation` object that
 this skill owns: `phase` (`intake`, `plan`, `build`, `complete` or `blocked`), `frozen`
-(`design_path`, `design_hash`, `target_sha`, `test_commands`, `required_ci_jobs`), `plan_round`,
+(`remote`, `design_path`, `design_hash`, `target_sha`, `test_commands`, `required_ci_jobs`),
+`plan_round`,
 `plan_hash`, `approved_plan_hash`, `current`, `blocked_reason`, and
 `phases`, a list with one entry per phase: `id`, `status` (`pending`, `active`, `merged` or
 `blocked`), `branch`, `target_sha`, `head_sha`, `tested_sha`, `reviewed_sha`, `signed_off_sha`,
@@ -90,7 +98,7 @@ steps. Evidence is tied to a SHA and is void when the head SHA changes.
 
 Run one phase at a time. Start a phase only when every phase it depends on is `merged`.
 
-1. Fetch the target branch and record `target_sha` from `origin/<target>`. Start a Codex
+1. Fetch the target branch and record `target_sha` from `<remote>/<target>`. Start a Codex
    implementer in its own branch worktree
    (`worker-start --agent codex --worktree new-top-level --repo id:<id> --name <branch>`), with the
    branch named by the project's convention. The spec must be self-contained: the run-record
@@ -138,7 +146,7 @@ Merge only if all hold at the moment of merging, re-checked from live state:
   (a pipeline merely existing is not success; missing, pending, failed, skipped or stale is not).
 - Target branch freshly fetched: if it moved since testing/review, integrate it, then repeat
   tests, CI, review and sign-off on the new head. Do not merge stale evidence.
-- The design file read from the freshly fetched `origin/<target>` commit still has
+- The design file read from the freshly fetched `<remote>/<target>` commit still has
   `frozen.design_hash`. If not, treat it as a design change.
 - The live MR's repository, source branch and target branch are the expected ones.
 - The host reports the MR mergeable under repository policy. Merge with a SHA-conditional merge
