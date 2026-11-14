@@ -33,25 +33,30 @@ CI jobs. **Inspect first**: `AGENTS.md`, `CLAUDE.md`, `README`, `CONTRIBUTING`, 
 `Makefile`/package scripts, `git remote -v`, default branch. Ask the user only for what is still
 missing, in one batch. Do not assume any framework, hardware, path or dependency.
 
-**Design gate.** Fetch the target branch and compute the SHA-256 of the design file as it exists
-there (`git show <target>:<path> | sha256sum`). Proceed only if the file is on the target branch
-and either the run record's `design.approved_hash` equals that hash, or the user confirms, when
-shown the path and hash, that this is the approved design. Otherwise stop and say what is missing.
-Do not write or repair a design here.
+**Design gate.** Fetch the target branch and resolve the fetched remote-tracking ref
+(`origin/<target>`, never the local branch) to a commit SHA. Read the design from that commit with
+`git show <sha>:<path>`; if that fails, the design is not on the target branch. Save those exact
+bytes as `design.md` in the run record and take their SHA-256. Proceed only if either the run
+record's `design.approved_hash` equals that hash, or the user confirms, when shown the path and
+hash, that this is the approved design. Otherwise stop and say what is missing. Do not write or
+repair a design here. From here on every reader, Claude and workers alike, uses the run-record
+`design.md` and its hash, never a design file in a checkout.
 
-Create or extend the run record and freeze: design path and hash, target branch and its SHA, test
-commands and required CI jobs. If any of these change later, treat it as a plan change.
+Create or extend the run record and record in `implementation.frozen`: design path and hash, the
+target SHA from the gate, test commands and required CI jobs. On resume, compare the project's
+current test commands and required CI jobs with `frozen`; any difference is a plan change.
 
 ## Run record
 
 Directory `$(git rev-parse --git-common-dir)/agent-runs/<task-id>/` (inside `.git`, never
 committed, shared across worktrees and with `design-convergence`). Task ID: short, `[a-z0-9-]`
-only; reuse the design's task ID when its run record exists. Files: `state.json`, `plan-r<N>.md`,
-`findings.md`, `evidence/<phase-id>/` (test logs, CI links).
+only; reuse the design's task ID when its run record exists. Files: `state.json`, `design.md`,
+`plan-r<N>.md`, `findings.md`, `evidence/<phase-id>/` (test logs, CI links).
 
 `state.json` has `"schema": 1`, `task_id`, `target_branch`, and an `implementation` object that
-this skill owns: `phase` (`intake`, `plan`, `build`, `complete` or `blocked`), `design_path`,
-`design_hash`, `plan_round`, `plan_hash`, `approved_plan_hash`, `current`, `blocked_reason`, and
+this skill owns: `phase` (`intake`, `plan`, `build`, `complete` or `blocked`), `frozen`
+(`design_path`, `design_hash`, `target_sha`, `test_commands`, `required_ci_jobs`), `plan_round`,
+`plan_hash`, `approved_plan_hash`, `current`, `blocked_reason`, and
 `phases`, a list with one entry per phase: `id`, `status` (`pending`, `active`, `merged` or
 `blocked`), `branch`, `target_sha`, `head_sha`, `tested_sha`, `reviewed_sha`, `signed_off_sha`,
 `mr`, `review_round`, `open_findings`. Leave every other key untouched. Update after every step. On
@@ -69,7 +74,8 @@ steps. Evidence is tied to a SHA and is void when the head SHA changes.
      Prefer few phases; one is fine. Put the riskiest assumption in the earliest phase that can
      test it.
 2. Start a **read-only** Codex critic (`worker-start --agent codex --worktree current`). The spec
-   must name the plan file, the design file and the code paths it may read; forbid edits, builds
+   must name the plan file, the run-record `design.md` with its hash, and the code paths it may
+   read; forbid edits, builds
    and network; ask for ranked findings (blocker/major/minor, concrete failure scenario, specific
    fix) on whether the plan covers the whole design, each phase is independently mergeable and
    testable, the order is sound and nothing exceeds the design, ending in APPROVED,
@@ -84,15 +90,19 @@ steps. Evidence is tied to a SHA and is void when the head SHA changes.
 
 Run one phase at a time. Start a phase only when every phase it depends on is `merged`.
 
-1. Fetch the target branch and record `target_sha`. Start a Codex implementer in its own branch
-   worktree (`worker-start --agent codex --worktree new-top-level --repo id:<id> --name <branch>`),
-   with the branch named by the project's convention. The spec must be self-contained: the design
-   path, this phase's section of the plan, the plan's structure, build/test commands and
-   environment, allowed files, branch name, and what to report. It must: implement only this
-   phase, run the tests, push the branch, and open the MR with the **actual** test commands and
-   results. It must never claim a test that did not run, and must report an environment blocker
-   rather than guess around it.
-2. Verify, don't trust: confirm the pushed SHA, branch and MR exist; read the evidence.
+1. Fetch the target branch and record `target_sha` from `origin/<target>`. Start a Codex
+   implementer in its own branch worktree
+   (`worker-start --agent codex --worktree new-top-level --repo id:<id> --name <branch>`), with the
+   branch named by the project's convention. The spec must be self-contained: the run-record
+   `design.md` and its hash, this phase's section of the plan, the plan's structure, build/test
+   commands and environment, allowed files, the target branch and `target_sha`, branch name, and
+   what to report. It must: create its branch from `target_sha`, implement only this phase, run the
+   tests, push the branch, and open the MR **into the target branch** with the **actual** test
+   commands and results. It must never claim a test that did not run, and must report an
+   environment blocker rather than guess around it.
+2. Verify, don't trust: confirm the pushed SHA, branch and MR exist, the branch descends from
+   `target_sha`, and the MR's repository, source branch and target branch are the expected ones;
+   read the evidence.
 3. Review as Claude, against the exact head SHA, for correctness against the design, this phase's
    acceptance criteria and the plan's structure, and for tests, safety and simplicity. Record
    findings with stable IDs (`<phase-id>-<n>`) in `findings.md`. Blocking findings become MR
@@ -128,8 +138,9 @@ Merge only if all hold at the moment of merging, re-checked from live state:
   (a pipeline merely existing is not success; missing, pending, failed, skipped or stale is not).
 - Target branch freshly fetched: if it moved since testing/review, integrate it, then repeat
   tests, CI, review and sign-off on the new head. Do not merge stale evidence.
-- The design file on the target branch still has `design_hash`. If not, treat it as a design
-  change.
+- The design file read from the freshly fetched `origin/<target>` commit still has
+  `frozen.design_hash`. If not, treat it as a design change.
+- The live MR's repository, source branch and target branch are the expected ones.
 - The host reports the MR mergeable under repository policy. Merge with a SHA-conditional merge
   (check the host CLI's help for the flag; do not guess) and **without** the delete-branch option.
   If the CLI defaults to auto-merge or merge-when-pipeline-succeeds, disable it so the merge is

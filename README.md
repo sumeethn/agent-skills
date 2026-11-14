@@ -19,6 +19,7 @@ project under `$(git rev-parse --git-common-dir)/agent-runs/`.
 
 ```bash
 git clone https://github.com/sumeethn/agent-skills ~/src/agent-skills
+mkdir -p ~/.claude/skills
 for skill in design-convergence phased-implementation; do
   ln -s ~/src/agent-skills/skills/$skill ~/.claude/skills/$skill
 done
@@ -34,6 +35,10 @@ In Claude Code inside any project repository, with Orca running:
 /design-convergence <problem statement>
 /phased-implementation <path to the approved design document>
 ```
+
+`design-convergence` opens the design MR but never merges it. Merge it under your repository's
+normal policy before running `phased-implementation`, which only starts from a design that is on
+the target branch.
 
 Each skill inspects the project's instructions first and asks only for what is missing.
 

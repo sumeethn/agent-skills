@@ -41,7 +41,8 @@ committed, shared across worktrees and with `phased-implementation`). Task ID: s
 only. Files: `state.json`, `design-r<N>.md`, `design-findings.md`.
 
 `state.json` has `"schema": 1`, `task_id`, `target_branch`, and a `design` object that this skill
-owns: `phase`, `round`, `hash`, `approved_hash`, `path`, `branch`, `commit_sha`, `mr`,
+owns: `phase` (`intake`, `review`, `approval`, `publish`, `published`, `abandoned` or
+`blocked`), `round`, `hash`, `approved_hash`, `path`, `branch`, `commit_sha`, `mr`,
 `blocked_reason`. Leave every other key untouched. Update after every step. On resume, read it,
 then reconcile with real git and MR state before acting; repeat only unfinished steps.
 
@@ -97,17 +98,20 @@ Run only after user approval.
 3. Verify, don't trust: the pushed commit and the merge request exist, and
    `git show <commit>:<path> | sha256sum` equals `approved_hash`. Record `branch`, `commit_sha` and
    `mr`.
-4. Stop. This skill does not merge. The design is ready for `phased-implementation` once that file,
+4. Stop. This skill does not merge. The user or a maintainer merges the design MR under the
+   repository's normal policy; the design is ready for `phased-implementation` once that file,
    with that hash, is on the target branch.
 
-Report the design path, the approved hash, the merge request and anything left open.
+Report the design path, the approved hash, the merge request, that it must be merged before
+`phased-implementation` can start, and anything left open.
 
 ## Cleanup
 
 After publishing, or when the run is abandoned: every worker message is handled and no gate is
 pending; close a settled critic with `worker-release` (`worker-stop` on a settled dispatch is a
 no-op and leaves a kept-open agent running) and confirm with `worker-list`. Set `design.phase` to
-`published`. Keep the run record. Remove a design worktree you created only if
+`published` only after verified publication, or to `abandoned` when the run is abandoned. Keep the
+run record. Remove a design worktree you created only if
 `git status --porcelain --ignored` is empty and its commit is pushed.
 
 If a token-saving hook rewrites or compresses command output, re-run decisive checks (git status,
