@@ -1,12 +1,21 @@
 # agent-skills
 
-Claude Code skills built on Orca orchestration (the `orchestration` skill). They add no
-orchestration framework of their own.
+Claude Code skills for model inference and system-level inference performance work (latency,
+throughput, memory, kernels, batching, scheduling, quantization, parallelism, serving). They are
+hardware- and framework-agnostic, and built on Orca orchestration (the `orchestration` skill)
+without adding an orchestration framework of their own.
 
 | Skill | Produces | Human gate |
 | --- | --- | --- |
-| [`design-convergence`](skills/design-convergence/SKILL.md) | An approved system design, committed as a document in a merge request. Claude writes it, a read-only Codex critic challenges it. | Design approval |
-| [`phased-implementation`](skills/phased-implementation/SKILL.md) | One merged MR per phase of an approved design. Claude plans and reviews, Codex implements; each merge is automatic and fail closed. | Plan approval |
+| [`design-convergence`](skills/design-convergence/SKILL.md) | An approved design grounded in a measured baseline and bottleneck analysis, with a performance contract, committed as a document in a merge request. Claude writes it, a read-only Codex critic challenges it. | Design approval |
+| [`phased-implementation`](skills/phased-implementation/SKILL.md) | One merged MR per phase of an approved design. Claude plans and reviews, Codex implements and measures each phase with an A/B benchmark on the target hardware; each merge is automatic and fail closed. | Plan approval |
+
+The **performance contract** in the design fixes the workload, the metrics and their targets, the
+quality gate that proves outputs are unchanged or acceptable, the environment manifest and the
+measurement protocol. `phased-implementation` enforces it: a phase merges only if quality holds,
+no contracted metric regresses beyond measured noise, and the phase's expected gain is measured on
+the same host against its base. A gain that does not materialize stops the run for a decision
+rather than being coded around.
 
 The handoff between them is the design document on the target branch, identified by its SHA-256.
 `phased-implementation` never edits the design; a needed design change stops it and goes back

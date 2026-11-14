@@ -1,16 +1,19 @@
 ---
 name: phased-implementation
 description: >-
-  Build an already-approved design in phases using Orca workers: Claude writes
-  the software structure and a phase plan, a read-only Codex critic checks it,
-  the user approves it, then for each phase Codex implements, tests, pushes a
-  branch and opens an MR while Claude reviews (max 5 rounds), and the MR is
-  merged automatically if every gate passes. Use when the user asks for phased
-  implementation of an approved design, Codex implementation with Claude review,
-  or an MR-per-phase workflow with automatic fail-closed merge. Needs an
-  approved design document (for example from `design-convergence`); it does not
-  create or change the design. Project-agnostic. Requires the `orchestration`
-  skill.
+  Build an approved model inference or inference performance design in phases
+  using Orca workers: Claude writes the software structure and a phase plan, a
+  read-only Codex critic checks it, the user approves it, then for each phase
+  Codex implements, runs the tests, the quality gate and an A/B benchmark against
+  the base on the target hardware, pushes a branch and opens an MR while Claude
+  reviews the code and the measurements (max 5 rounds); the MR merges
+  automatically only if quality holds, no contracted metric regresses and the
+  phase's measured gain is met. Use when the user asks for phased implementation
+  of an approved inference design, Codex implementation with Claude review, or an
+  MR-per-phase optimization workflow with automatic fail-closed merge. Needs an
+  approved design document with a performance contract (for example from
+  `design-convergence`); it does not create or change the design. Hardware- and
+  framework-agnostic. Requires the `orchestration` skill.
 ---
 
 # Phased implementation
@@ -22,16 +25,22 @@ terminal, and do not build another orchestration layer. Deterministic gates belo
 check, not the agents'.
 
 **This skill owns** how an approved design is built: code structure behind the design's interfaces,
-the slicing into phases, implementation, review and merge. **It does not own** the design. A change
-to scope, an interface, the data model or agreed behaviour is a design change (see Changes).
+the slicing into phases, implementation, measurement, review and merge. **It does not own** the
+design. A change to scope, an interface, the data model, agreed behaviour or the performance
+contract (workload, metrics, targets, quality gate) is a design change (see Changes).
 
 ## 0. Intake (at invocation)
 
 Needed: the design document path, repository and host (e.g. GitLab project), target branch, where
-code runs and tests run (local or remote, and how it is reached), build/test commands, and required
-CI jobs. **Inspect first**: `AGENTS.md`, `CLAUDE.md`, `README`, `CONTRIBUTING`, CI config,
-`Makefile`/package scripts, `git remote -v`, default branch. Ask the user only for what is still
+code builds and where benchmarks run (the target hardware and how it is reached, and whether access
+is exclusive while measuring), build/test commands, the benchmark and quality-gate commands from
+the design's measurement protocol, and required CI jobs. **Inspect first**: `AGENTS.md`,
+`CLAUDE.md`, `README`, `CONTRIBUTING`, CI config, `Makefile`/package scripts, existing benchmark
+and evaluation tooling, `git remote -v`, default branch. Ask the user only for what is still
 missing, in one batch. Do not assume any framework, hardware, path or dependency.
+
+If the design has no performance contract, stop and say so; it must go back through
+`design-convergence`.
 
 **Target remote.** Identify the git remote whose URL is the MR's repository (often `origin`, but
 in a fork checkout usually `upstream`); confirm it matches the repository and host from intake. Every
@@ -47,10 +56,11 @@ repair a design here. From here on every reader, Claude and workers alike, uses 
 `design.md` and its hash, never a design file in a checkout.
 
 **New run**: create the run record and set `implementation.frozen` once: target remote, design
-path and hash, the target SHA from the gate, test commands and required CI jobs. **Resume**: never
-overwrite `frozen` at intake. First compare it with what intake found: a different design hash is a
-design change, and different test commands, required CI jobs or target remote are a plan change.
-Replace `frozen` (and the run-record `design.md`) only when that design or plan change has been
+path and hash, the target SHA from the gate, test commands, benchmark and quality-gate commands,
+the environment manifest, and required CI jobs. **Resume**: never overwrite `frozen` at intake.
+First compare it with what intake found: a different design hash is a design change, and different
+commands, environment manifest, required CI jobs or target remote are a plan change. Replace
+`frozen` (and the run-record `design.md`) only when that design or plan change has been
 re-approved.
 
 ## Run record
@@ -58,16 +68,18 @@ re-approved.
 Directory `$(git rev-parse --git-common-dir)/agent-runs/<task-id>/` (inside `.git`, never
 committed, shared across worktrees and with `design-convergence`). Task ID: short, `[a-z0-9-]`
 only; reuse the design's task ID when its run record exists. Files: `state.json`, `design.md`,
-`plan-r<N>.md`, `findings.md`, `evidence/<phase-id>/` (test logs, CI links).
+`plan-r<N>.md`, `findings.md`, `baseline/` (shared with `design-convergence`),
+`evidence/<phase-id>/` (test logs, quality-gate output, raw A/B benchmark results, profiles,
+environment manifest, CI links).
 
 `state.json` has `"schema": 1`, `task_id`, `target_branch`, and an `implementation` object that
 this skill owns: `phase` (`intake`, `plan`, `build`, `complete` or `blocked`), `frozen`
-(`remote`, `design_path`, `design_hash`, `target_sha`, `test_commands`, `required_ci_jobs`),
-`plan_round`,
-`plan_hash`, `approved_plan_hash`, `current`, `blocked_reason`, and
+(`remote`, `design_path`, `design_hash`, `target_sha`, `test_commands`, `benchmark_commands`,
+`quality_commands`, `environment`, `required_ci_jobs`), `baseline` (`sha`, `noise_threshold`,
+`results` path), `plan_round`, `plan_hash`, `approved_plan_hash`, `current`, `blocked_reason`, and
 `phases`, a list with one entry per phase: `id`, `status` (`pending`, `active`, `merged` or
-`blocked`), `branch`, `target_sha`, `head_sha`, `tested_sha`, `reviewed_sha`, `signed_off_sha`,
-`mr`, `review_round`, `open_findings`. Leave every other key untouched. Update after every step. On
+`blocked`), `branch`, `target_sha`, `head_sha`, `tested_sha`, `measured_sha`, `reviewed_sha`,
+`signed_off_sha`, `mr`, `review_round`, `open_findings`. Leave every other key untouched. Update after every step. On
 resume, read it, then reconcile with real git and MR state before acting; repeat only unfinished
 steps. Evidence is tied to a SHA and is void when the head SHA changes.
 
@@ -77,16 +89,20 @@ steps. Evidence is tied to a SHA and is void when the head SHA changes.
    - **Structure**: the modules or files to add or change, what each is responsible for, and which
      may depend on which. It must realise the design's interfaces exactly, without adding to them.
    - **Phases**: an ordered list. Each phase has an ID (`[a-z0-9-]`), scope, allowed files,
-     acceptance criteria, the tests that prove them, and the earlier phases it depends on. Each
-     phase is one merge request that leaves the target branch building and passing on its own.
-     Prefer few phases; one is fine. Put the riskiest assumption in the earliest phase that can
-     test it.
+     acceptance criteria, the tests that prove them, and the earlier phases it depends on. An
+     optimization phase also names the design hypothesis it implements, its expected effect on each
+     contracted metric, and the **minimum measured gain** that counts as success. Each phase is one
+     merge request that leaves the target branch building, passing and within the quality gate on
+     its own. Prefer few phases; one is fine. If the benchmark harness or quality gate does not
+     exist yet, the first phase builds only them, with no optimization. Put the riskiest
+     hypothesis in the earliest phase that can test it.
 2. Start a **read-only** Codex critic (`worker-start --agent codex --worktree current`). The spec
    must name the plan file, the run-record `design.md` with its hash, and the code paths it may
    read; forbid edits, builds
    and network; ask for ranked findings (blocker/major/minor, concrete failure scenario, specific
    fix) on whether the plan covers the whole design, each phase is independently mergeable and
-   testable, the order is sound and nothing exceeds the design, ending in APPROVED,
+   testable, each phase's gain is measurable in isolation with the frozen protocol, the order is
+   sound and nothing exceeds the design, ending in APPROVED,
    CHANGES_REQUESTED or ESCALATE. Then end your turn; Orca wakes you.
 3. Revise for each valid finding; state which you reject and why. **Agreement** = APPROVED on the
    `plan_hash` you hold. After round 2 without agreement, or on any ESCALATE, stop and give the
@@ -94,7 +110,16 @@ steps. Evidence is tied to a SHA and is void when the head SHA changes.
 4. Present the plan and **stop for explicit user approval**. Record `approved_plan_hash` and create
    the `phases` entries. Do not start a phase without it.
 
-## 2. Build each phase, in order (max 5 review rounds per phase)
+## 2. Baseline
+
+Before the first optimization phase, establish the baseline on the frozen environment at the
+current target SHA: run the benchmark protocol repeatedly on the same build to measure the noise
+threshold, then record the baseline results and the quality-gate reference outputs. Reuse the
+design's `baseline/` only if its environment manifest and SHA still match. If the harness is
+built by an earlier phase, measure the baseline right after that phase merges. Record
+`implementation.baseline`.
+
+## 3. Build each phase, in order (max 5 review rounds per phase)
 
 Run one phase at a time. Start a phase only when every phase it depends on is `merged`.
 
@@ -105,36 +130,49 @@ Run one phase at a time. Start a phase only when every phase it depends on is `m
    `design.md` and its hash, this phase's section of the plan, the plan's structure, build/test
    commands and environment, allowed files, the target branch and `target_sha`, branch name, and
    what to report. It must: create its branch from `target_sha`, implement only this phase, run the
-   tests, push the branch, and open the MR **into the target branch** with the **actual** test
-   commands and results. It must never claim a test that did not run, and must report an
-   environment blocker rather than guess around it.
+   tests and the quality gate, and for an optimization phase run an **A/B benchmark** with the
+   frozen protocol: base (`target_sha`) and head built the same way and measured on the same host
+   in the same session, interleaved, with the environment manifest captured, plus a profile that
+   shows the mechanism behind any change. Then push the branch and open the MR **into the target
+   branch** with the **actual** commands, raw numbers, spread and manifest. It must never claim a
+   test or measurement that did not run, must not tune the benchmark or workload to the change, and
+   must report an environment blocker rather than guess around it.
 2. Verify, don't trust: confirm the pushed SHA, branch and MR exist, the branch descends from
    `target_sha`, and the MR's repository, source branch and target branch are the expected ones;
    read the evidence.
 3. Review as Claude, against the exact head SHA, for correctness against the design, this phase's
-   acceptance criteria and the plan's structure, and for tests, safety and simplicity. Record
-   findings with stable IDs (`<phase-id>-<n>`) in `findings.md`. Blocking findings become MR
-   discussions when the host supports it.
-4. Send blocking findings to the implementer with `send`. It fixes, reruns affected tests, pushes,
-   and reports the new SHA and results. Review that SHA. A prior finding counts as resolved only
-   when you explicitly dispose of it.
-5. After 5 unsuccessful rounds, stop and escalate to the user with the open findings.
-6. **Sign-off.** When you have no open blocking finding on a head SHA, ask the implementer to
+   acceptance criteria and the plan's structure, and for tests, safety and simplicity. Check the
+   measurements: the manifest matches `frozen.environment`, the protocol was followed, the quality
+   gate passed, every contracted metric either improved beyond the noise threshold or stayed within
+   it, the gain meets the phase minimum, and the profile explains it. Record findings with stable
+   IDs (`<phase-id>-<n>`) in `findings.md`. Blocking findings become MR discussions when the host
+   supports it.
+4. Send blocking findings to the implementer with `send`. It fixes, reruns affected tests, the
+   quality gate and the A/B benchmark, pushes, and reports the new SHA and results. Review that
+   SHA. A prior finding counts as resolved only when you explicitly dispose of it.
+5. **A hypothesis that does not hold is not a review finding to code around.** If the phase is
+   correct and within the quality gate but its measured gain is below the minimum, or the profile
+   shows a different bottleneck, stop the phase and bring the user the numbers: it is a plan
+   change, or a design change if the bottleneck analysis was wrong.
+6. After 5 unsuccessful rounds, stop and escalate to the user with the open findings.
+7. **Sign-off.** When you have no open blocking finding on a head SHA, ask the implementer to
    confirm for that exact SHA: it is its final push, nothing is unpushed, and it knows of no
-   unreported failing test or deviation from the design or plan. Record `signed_off_sha`. A
-   confirmation for an older SHA does not count.
-7. Merge (see Phase completion), clean up the phase, mark it `merged`, then check the remaining
-   plan against what was actually merged before starting the next phase.
+   unreported failing test, measurement or deviation from the design or plan. Record
+   `signed_off_sha`. A confirmation for an older SHA does not count.
+8. Merge (see Phase completion), clean up the phase, mark it `merged`, then check the remaining
+   plan against what was actually merged and measured before starting the next phase.
 
 ## Changes
 
-- **Design change** (scope, an interface, the data model, agreed behaviour): stop the implementer,
+- **Design change** (scope, an interface, the data model, agreed behaviour, the performance
+  contract, or a disproven bottleneck analysis): stop the implementer,
   set `phase` to `blocked` with the reason, and tell the user exactly what in the design must
   change. The design is revised and re-approved outside this skill (`design-convergence`). Resume
   only through the design gate with the new hash, then re-plan the unmerged phases.
-- **Plan change** (phase boundaries, order, acceptance criteria, structure, frozen commands): revise
-  the plan for the unmerged phases, run one critic round, and get user approval again. Merged
-  phases stay as they are.
+- **Plan change** (phase boundaries, order, acceptance criteria or minimum gains, structure, frozen
+  commands, or the environment manifest): revise the plan for the unmerged phases, run one critic
+  round, and get user approval again. A new environment also needs a new baseline. Merged phases
+  stay as they are.
 - Anything else is ordinary review within the phase.
 
 ## Phase completion (automatic, fail closed)
@@ -142,10 +180,15 @@ Run one phase at a time. Start a phase only when every phase it depends on is `m
 Merge only if all hold at the moment of merging, re-checked from live state:
 - Claude approved and the implementer signed off on the **same latest head SHA**; no open blocking
   findings.
-- Required tests passed on that SHA; CI succeeded for that SHA with every required job passing
-  (a pipeline merely existing is not success; missing, pending, failed, skipped or stale is not).
+- Required tests and the quality gate passed on that SHA; CI succeeded for that SHA with every
+  required job passing (a pipeline merely existing is not success; missing, pending, failed,
+  skipped or stale is not).
+- For an optimization phase, the A/B benchmark ran on that SHA (`measured_sha`) against its base on
+  the frozen environment: no contracted metric regressed beyond the noise threshold, and the gain
+  meets the phase minimum.
 - Target branch freshly fetched: if it moved since testing/review, integrate it, then repeat
-  tests, CI, review and sign-off on the new head. Do not merge stale evidence.
+  tests, the quality gate, the A/B benchmark against the new base, CI, review and sign-off on the
+  new head. Do not merge stale evidence.
 - The design file read from the freshly fetched `<remote>/<target>` commit still has
   `frozen.design_hash`. If not, treat it as a design change.
 - The live MR's repository, source branch and target branch are the expected ones.
@@ -184,8 +227,11 @@ when merge and deletion are both verified, and tell the user in one line which p
    command: the run is complete when all tasks are completed, no gates are pending and no worker is
    live. Confirm with `worker-list` that every worker is `exited` and `released`. Set `phase` to
    `complete` in `state.json`.
-5. **Preserve**: the run record and `evidence/` (under `.git`), remote environments, caches and
-   downloaded model weights. Report what was kept and what was removed.
+5. **Report the result against the contract**: run the frozen protocol once more on the final
+   target SHA against the baseline SHA, A/B on the same host, and report each contracted metric's
+   baseline, final value, spread and target, and whether the quality gate held.
+6. **Preserve**: the run record, `baseline/` and `evidence/` (under `.git`), remote environments,
+   caches and downloaded model weights. Report what was kept and what was removed.
 
 If a token-saving hook rewrites or compresses command output, re-run decisive checks (git status,
 merge help) with the full binary path before acting on them.
@@ -196,6 +242,9 @@ merge help) with the full binary path before acting on them.
 - Never edit the design document; a needed change stops the run.
 - One phase, one branch, one MR. No phase starts before its dependencies are merged.
 - Report only what was actually run. Mocked results are labelled as mocked.
+- Every performance number names its SHA, environment manifest and protocol. Never compare numbers
+  from different hosts, environments or sessions, and never change the workload or benchmark to
+  make a phase pass.
 - No credentials, tokens, or project config in the skill, run record, MR text or worker specs.
 - No force-push, no hook skipping, no protection bypass, no unrelated branch changes.
 - Do not add features, abstractions, or flags beyond the approved design and plan.
